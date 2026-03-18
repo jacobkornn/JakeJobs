@@ -386,6 +386,72 @@ export function registerDynamicsHandlers(ipcMain: IpcMain) {
       jobLinks: existingJobLinks.size,
     };
   });
+
+  /**
+   * Look up systemuserid by internalemailaddress
+   */
+  ipcMain.handle("dynamics:getSystemUserId", async (_event, email: string) => {
+    const safeEmail = email.replace(/'/g, "''");
+    const res = await dynamicsFetch(
+      `/systemusers?$select=systemuserid,internalemailaddress&$filter=internalemailaddress eq '${safeEmail}'`
+    );
+    if (!res.ok) throw new Error(`Failed to lookup systemuser: ${res.status}`);
+    const data = await res.json();
+    const items = data.value || [];
+    if (!items.length) throw new Error(`No systemuser found for ${email}`);
+    return items[0].systemuserid;
+  });
+
+  /**
+   * Log a sent email as an activity in Dynamics
+   */
+  ipcMain.handle(
+    "dynamics:logEmailActivity",
+    async (
+      _event,
+      params: {
+        contactId: string;
+        subject: string;
+        body: string;
+        senderSystemUserId: string;
+        jobPostingId?: string;
+      }
+    ) => {
+      const payload: Record<string, unknown> = {
+        subject: params.subject,
+        description: params.body,
+        directioncode: true, // outgoing
+        email_activity_parties: [
+          {
+            "partyid_systemuser@odata.bind": `/systemusers(${params.senderSystemUserId})`,
+            participationtypemask: 1, // FROM
+          },
+          {
+            "partyid_contact@odata.bind": `/contacts(${params.contactId})`,
+            participationtypemask: 2, // TO
+          },
+        ],
+        "regardingobjectid_contact@odata.bind": `/contacts(${params.contactId})`,
+      };
+
+      if (params.jobPostingId) {
+        payload["regardingobjectid_cr21a_jobposting@odata.bind"] =
+          `/cr21a_jobpostings(${params.jobPostingId})`;
+      }
+
+      const res = await dynamicsFetch("/emails", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Failed to log email activity: ${res.status} ${errText}`);
+      }
+
+      return { success: true };
+    }
+  );
 }
 
 export { dynamicsFetch, fetchAllPaginated, accountsByName, existingJobLinks, ensureCaches };

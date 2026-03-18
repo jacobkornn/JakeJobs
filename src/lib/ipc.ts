@@ -16,6 +16,14 @@ export interface DynamicsApi {
   getBatchNewAccounts: () => Promise<Array<{ id: string; name: string; website?: string }>>;
   getBatchNewJobs: () => Promise<Array<Record<string, unknown>>>;
   refreshCaches: () => Promise<{ accounts: number; jobLinks: number }>;
+  getSystemUserId: (email: string) => Promise<string>;
+  logEmailActivity: (params: {
+    contactId: string;
+    subject: string;
+    body: string;
+    senderSystemUserId: string;
+    jobPostingId?: string;
+  }) => Promise<{ success: boolean }>;
 }
 
 export interface DownloadFile {

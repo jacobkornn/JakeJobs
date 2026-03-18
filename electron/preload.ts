@@ -11,6 +11,10 @@ const api = {
     getBatchNewAccounts: () => ipcRenderer.invoke("dynamics:getBatchNewAccounts"),
     getBatchNewJobs: () => ipcRenderer.invoke("dynamics:getBatchNewJobs"),
     refreshCaches: () => ipcRenderer.invoke("dynamics:refreshCaches"),
+    getSystemUserId: (email: string) =>
+      ipcRenderer.invoke("dynamics:getSystemUserId", email),
+    logEmailActivity: (params: { contactId: string; subject: string; body: string; senderSystemUserId: string; jobPostingId?: string }) =>
+      ipcRenderer.invoke("dynamics:logEmailActivity", params),
   },
 
   // Careerflow (CSV import from Downloads)

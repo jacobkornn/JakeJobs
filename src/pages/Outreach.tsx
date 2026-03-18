@@ -62,6 +62,7 @@ export default function Outreach() {
   const [checkingReplies, setCheckingReplies] = useState(false);
   const [attachResumes, setAttachResumes] = useState(true);
   const [editingHtml, setEditingHtml] = useState(false);
+  const [systemUserId, setSystemUserId] = useState<string | null>(null);
 
   const addMessage = (text: string, type: StatusMessage["type"] = "info") => {
     setMessages((prev) => [
@@ -73,6 +74,10 @@ export default function Outreach() {
   useEffect(() => {
     loadData();
     loadTracking();
+    // Cache systemuser ID for Dynamics activity logging
+    if (api) {
+      api.dynamics.getSystemUserId("jake.korn@theboxk.com").then(setSystemUserId).catch(() => {});
+    }
   }, []);
 
   const loadData = async () => {
@@ -256,6 +261,22 @@ export default function Outreach() {
           setTrackedEmails((prev) => [...prev, result.tracked!]);
         }
         await api.graph.saveTrackedEmails();
+
+        // Log email as activity in Dynamics
+        if (systemUserId && draft.contactId) {
+          try {
+            await api.dynamics.logEmailActivity({
+              contactId: draft.contactId,
+              subject: draft.subject,
+              body: draft.body,
+              senderSystemUserId: systemUserId,
+              jobPostingId: draft.jobId,
+            });
+          } catch (err) {
+            addMessage(`Sent but failed to log activity in Dynamics: ${String(err)}`, "warning");
+          }
+        }
+
         addMessage(`Sent to ${draft.contactEmail} (${draft.leadType})`, "success");
       }
     } catch (err) {
