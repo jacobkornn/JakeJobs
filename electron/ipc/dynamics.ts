@@ -1,22 +1,33 @@
 import { IpcMain } from "electron";
 import { ConfidentialClientApplication } from "@azure/msal-node";
 
-const DYNAMICS_ORG_URL = process.env.DYNAMICS_ORG_URL || "";
-const API_BASE = `${DYNAMICS_ORG_URL}/api/data/v9.2`;
+const getOrgUrl = () => process.env.DYNAMICS_ORG_URL || "";
+const getApiBase = () => `${getOrgUrl()}/api/data/v9.2`;
 const BATCH_SIZE = 100;
 
 let msalClient: ConfidentialClientApplication | null = null;
 let cachedToken: string | null = null;
 let tokenExpiry = 0;
 
-// In-memory caches
-const accountsCache = new Map<string, { id: string; name: string; domain?: string; website?: string; linkedinUrl?: string }>();
-const contactsCache = new Map<string, { id: string; name: string; email?: string; accountId?: string }>();
+// ─── Caches (loaded from Dynamics once, updated on creates) ───
 
-// Pending changes (accumulate until user syncs)
-const pendingAccounts: Array<Record<string, unknown>> = [];
-const pendingContacts: Array<Record<string, unknown>> = [];
-const pendingJobs: Array<Record<string, unknown>> = [];
+interface CachedAccount {
+  id: string;
+  name: string;
+  domain?: string;
+  website?: string;
+}
+
+const accountsByName = new Map<string, CachedAccount>();
+const existingJobLinks = new Set<string>();
+let cachesLoaded = false;
+
+// ─── Current batch tracking (reset each pull) ───
+
+let batchNewAccounts: CachedAccount[] = [];
+let batchNewJobs: Array<Record<string, unknown>> = [];
+
+// ─── Auth ───
 
 function getMsalClient(): ConfidentialClientApplication {
   if (!msalClient) {
@@ -36,7 +47,7 @@ async function getToken(): Promise<string> {
     return cachedToken;
   }
   const result = await getMsalClient().acquireTokenByClientCredential({
-    scopes: [`${DYNAMICS_ORG_URL}/.default`],
+    scopes: [`${getOrgUrl()}/.default`],
   });
   if (!result?.accessToken) throw new Error("Failed to acquire Dynamics token");
   cachedToken = result.accessToken;
@@ -44,9 +55,11 @@ async function getToken(): Promise<string> {
   return cachedToken;
 }
 
+// ─── HTTP helpers ───
+
 async function dynamicsFetch(path: string, options: RequestInit = {}): Promise<Response> {
   const token = await getToken();
-  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const url = path.startsWith("http") ? path : `${getApiBase()}${path}`;
 
   const maxRetries = 3;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -86,6 +99,7 @@ async function fetchAllPaginated<T>(path: string): Promise<T[]> {
 
   while (url) {
     const res = await dynamicsFetch(url);
+    if (!res.ok) throw new Error(`Dynamics fetch failed: ${res.status}`);
     const data = await res.json();
     results.push(...(data.value || []));
     url = data["@odata.nextLink"] || null;
@@ -94,62 +108,20 @@ async function fetchAllPaginated<T>(path: string): Promise<T[]> {
   return results;
 }
 
-async function executeBatch(operations: Array<{ method: string; url: string; body?: unknown }>): Promise<unknown[]> {
-  const token = await getToken();
-  const batchId = `batch_${Date.now()}`;
-  const changesetId = `changeset_${Date.now()}`;
+// ─── Cache loading (one-time from Dynamics) ───
 
-  const parts: string[] = [];
-  for (let i = 0; i < operations.length; i++) {
-    const op = operations[i];
-    let part = `--${changesetId}\r\n`;
-    part += "Content-Type: application/http\r\n";
-    part += "Content-Transfer-Encoding: binary\r\n";
-    part += `Content-ID: ${i + 1}\r\n\r\n`;
-    part += `${op.method} ${API_BASE}${op.url} HTTP/1.1\r\n`;
-    part += "Content-Type: application/json\r\n";
-    part += "Accept: application/json\r\n\r\n";
-    if (op.body) {
-      part += JSON.stringify(op.body);
-    }
-    parts.push(part);
-  }
+async function ensureCaches(): Promise<void> {
+  if (cachesLoaded) return;
 
-  const body =
-    `--${batchId}\r\n` +
-    `Content-Type: multipart/mixed; boundary=${changesetId}\r\n\r\n` +
-    parts.join("\r\n") +
-    `\r\n--${changesetId}--\r\n` +
-    `--${batchId}--`;
-
-  const res = await fetch(`${API_BASE}/$batch`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": `multipart/mixed; boundary=${batchId}`,
-      "OData-MaxVersion": "4.0",
-      "OData-Version": "4.0",
-      Accept: "application/json",
-    },
-    body,
-  });
-
-  if (!res.ok) {
-    throw new Error(`Batch request failed: ${res.status}`);
-  }
-
-  return [await res.text()];
-}
-
-async function loadAccountsCache(): Promise<void> {
+  // Load all accounts
   const accounts = await fetchAllPaginated<Record<string, string>>(
     "/accounts?$select=accountid,name,websiteurl,cr21a_domain"
   );
-  accountsCache.clear();
+  accountsByName.clear();
   for (const acc of accounts) {
     const key = acc.name?.toLowerCase().trim();
     if (key) {
-      accountsCache.set(key, {
+      accountsByName.set(key, {
         id: acc.accountid,
         name: acc.name,
         domain: acc.cr21a_domain,
@@ -157,35 +129,124 @@ async function loadAccountsCache(): Promise<void> {
       });
     }
   }
+
+  // Load all existing job links
+  const jobs = await fetchAllPaginated<Record<string, string>>(
+    "/cr21a_jobpostings?$select=cr21a_joblink"
+  );
+  existingJobLinks.clear();
+  for (const j of jobs) {
+    const link = j.cr21a_joblink?.trim();
+    if (link) existingJobLinks.add(link);
+  }
+
+  cachesLoaded = true;
 }
 
-async function loadContactsCache(): Promise<void> {
-  const contacts = await fetchAllPaginated<Record<string, string>>(
-    "/contacts?$select=contactid,fullname,emailaddress1,_parentcustomerid_value"
-  );
-  contactsCache.clear();
-  for (const c of contacts) {
-    const email = c.emailaddress1?.toLowerCase().trim();
-    if (email) {
-      contactsCache.set(email, {
-        id: c.contactid,
-        name: c.fullname,
-        email: c.emailaddress1,
-        accountId: c._parentcustomerid_value,
-      });
-    }
+// ─── Account upsert (cache-first, API create if new) ───
+
+async function upsertAccount(name: string, website?: string): Promise<CachedAccount> {
+  const key = name.toLowerCase().trim();
+  const existing = accountsByName.get(key);
+  if (existing) return existing;
+
+  // Create in Dynamics
+  const payload: Record<string, string> = { name };
+  if (website) payload.websiteurl = website;
+
+  const res = await dynamicsFetch("/accounts", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Account creation failed for "${name}": ${res.status} ${await res.text()}`);
   }
+
+  // Extract ID from OData-EntityId header
+  const entityId = res.headers.get("OData-EntityId") || "";
+  const match = entityId.match(/\(([^)]+)\)/);
+  const accountId = match ? match[1] : "";
+
+  if (!accountId) {
+    throw new Error(`Failed to extract account ID for "${name}"`);
+  }
+
+  const account: CachedAccount = { id: accountId, name, website };
+  accountsByName.set(key, account);
+  batchNewAccounts.push(account);
+
+  return account;
 }
+
+// ─── Job creation (linked to account, deduplicated by job link) ───
+
+async function createJob(
+  jobData: Record<string, string>,
+  accountId: string
+): Promise<boolean> {
+  const jobLink = jobData.jobLink?.trim();
+
+  // Skip duplicates
+  if (jobLink && existingJobLinks.has(jobLink)) {
+    return false;
+  }
+
+  const payload: Record<string, unknown> = {
+    cr21a_jobtitle: jobData.jobTitle || undefined,
+    cr21a_companyname: jobData.companyName || undefined,
+    cr21a_location: jobData.location || undefined,
+    cr21a_joblink: jobLink || undefined,
+    cr21a_source: jobData.source || undefined,
+    cr21a_tags: jobData.tags || undefined,
+    // Bind to account
+    "cr21a_jobposting@odata.bind": `/accounts(${accountId})`,
+  };
+
+  // Date fields
+  if (jobData.dateAdded) {
+    try {
+      payload.cr21a_dateadded = new Date(jobData.dateAdded).toISOString();
+    } catch { /* skip invalid dates */ }
+  }
+
+  // Remove undefined values
+  for (const k of Object.keys(payload)) {
+    if (payload[k] === undefined) delete payload[k];
+  }
+
+  const res = await dynamicsFetch("/cr21a_jobpostings", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Job creation failed: ${res.status} ${errText}`);
+  }
+
+  if (jobLink) existingJobLinks.add(jobLink);
+  return true;
+}
+
+// ─── IPC Handlers ───
 
 export function registerDynamicsHandlers(ipcMain: IpcMain) {
   ipcMain.handle("dynamics:getAccounts", async () => {
-    if (accountsCache.size === 0) await loadAccountsCache();
-    return Array.from(accountsCache.values());
+    await ensureCaches();
+    return Array.from(accountsByName.values());
   });
 
   ipcMain.handle("dynamics:getContacts", async () => {
-    if (contactsCache.size === 0) await loadContactsCache();
-    return Array.from(contactsCache.values());
+    const contacts = await fetchAllPaginated<Record<string, string>>(
+      "/contacts?$select=contactid,fullname,emailaddress1,_parentcustomerid_value"
+    );
+    return contacts.map((c) => ({
+      id: c.contactid,
+      name: c.fullname,
+      email: c.emailaddress1,
+      accountId: c._parentcustomerid_value,
+    }));
   });
 
   ipcMain.handle("dynamics:getJobs", async () => {
@@ -194,131 +255,86 @@ export function registerDynamicsHandlers(ipcMain: IpcMain) {
     );
   });
 
-  ipcMain.handle("dynamics:getPendingCount", () => {
+  /**
+   * Process a batch of jobs from the pull stage:
+   * - Upsert accounts (create if new, get ID if existing)
+   * - Create jobs linked to accounts (skip duplicates by job link)
+   * - Returns what's new vs what was skipped
+   */
+  ipcMain.handle(
+    "dynamics:processJobBatch",
+    async (_event, jobs: Array<Record<string, string>>) => {
+      await ensureCaches();
+
+      // Reset batch tracking
+      batchNewAccounts = [];
+      batchNewJobs = [];
+
+      const results = {
+        newAccounts: 0,
+        existingAccounts: 0,
+        newJobs: 0,
+        skippedJobs: 0,
+        errors: [] as string[],
+      };
+
+      for (const job of jobs) {
+        const companyName = job.companyName?.trim();
+        if (!companyName) {
+          results.errors.push(`Skipped job "${job.jobTitle}": no company name`);
+          continue;
+        }
+
+        try {
+          // Upsert account
+          const wasNew = !accountsByName.has(companyName.toLowerCase().trim());
+          const account = await upsertAccount(companyName, job.website);
+
+          if (wasNew) results.newAccounts++;
+          else results.existingAccounts++;
+
+          // Create job linked to account
+          const created = await createJob(job, account.id);
+          if (created) {
+            results.newJobs++;
+            batchNewJobs.push({ ...job, accountId: account.id });
+          } else {
+            results.skippedJobs++;
+          }
+        } catch (err) {
+          results.errors.push(`${job.jobTitle} at ${companyName}: ${String(err)}`);
+        }
+      }
+
+      return results;
+    }
+  );
+
+  /**
+   * Get new accounts from the current batch (for export to Sales Navigator)
+   */
+  ipcMain.handle("dynamics:getBatchNewAccounts", async () => {
+    return batchNewAccounts;
+  });
+
+  /**
+   * Get new jobs from the current batch
+   */
+  ipcMain.handle("dynamics:getBatchNewJobs", async () => {
+    return batchNewJobs;
+  });
+
+  /**
+   * Force reload caches from Dynamics
+   */
+  ipcMain.handle("dynamics:refreshCaches", async () => {
+    cachesLoaded = false;
+    await ensureCaches();
     return {
-      accounts: pendingAccounts.length,
-      contacts: pendingContacts.length,
-      jobs: pendingJobs.length,
+      accounts: accountsByName.size,
+      jobLinks: existingJobLinks.size,
     };
   });
-
-  ipcMain.handle("dynamics:syncPending", async () => {
-    const results = { accounts: 0, contacts: 0, jobs: 0, errors: [] as string[] };
-
-    // Batch create accounts
-    for (let i = 0; i < pendingAccounts.length; i += BATCH_SIZE) {
-      const batch = pendingAccounts.slice(i, i + BATCH_SIZE);
-      const ops = batch.map((acc) => ({
-        method: "POST",
-        url: "/accounts",
-        body: acc,
-      }));
-      try {
-        await executeBatch(ops);
-        results.accounts += batch.length;
-      } catch (e) {
-        // Fallback: create individually
-        for (const acc of batch) {
-          try {
-            const res = await dynamicsFetch("/accounts", {
-              method: "POST",
-              body: JSON.stringify(acc),
-            });
-            if (res.ok) results.accounts++;
-            else results.errors.push(`Account ${acc.name}: ${res.status}`);
-          } catch (err) {
-            results.errors.push(`Account ${acc.name}: ${String(err)}`);
-          }
-        }
-      }
-    }
-
-    // Batch create contacts (with account binding)
-    for (let i = 0; i < pendingContacts.length; i += BATCH_SIZE) {
-      const batch = pendingContacts.slice(i, i + BATCH_SIZE);
-      const ops = batch.map((c) => ({
-        method: "POST",
-        url: "/contacts",
-        body: c,
-      }));
-      try {
-        await executeBatch(ops);
-        results.contacts += batch.length;
-      } catch (e) {
-        for (const c of batch) {
-          try {
-            const res = await dynamicsFetch("/contacts", {
-              method: "POST",
-              body: JSON.stringify(c),
-            });
-            if (res.ok) results.contacts++;
-            else results.errors.push(`Contact ${c.fullname}: ${res.status}`);
-          } catch (err) {
-            results.errors.push(`Contact ${c.fullname}: ${String(err)}`);
-          }
-        }
-      }
-    }
-
-    // Batch create jobs
-    for (let i = 0; i < pendingJobs.length; i += BATCH_SIZE) {
-      const batch = pendingJobs.slice(i, i + BATCH_SIZE);
-      const ops = batch.map((j) => ({
-        method: "POST",
-        url: "/cr21a_jobpostings",
-        body: j,
-      }));
-      try {
-        await executeBatch(ops);
-        results.jobs += batch.length;
-      } catch (e) {
-        for (const j of batch) {
-          try {
-            const res = await dynamicsFetch("/cr21a_jobpostings", {
-              method: "POST",
-              body: JSON.stringify(j),
-            });
-            if (res.ok) results.jobs++;
-            else results.errors.push(`Job ${j.cr21a_jobtitle}: ${res.status}`);
-          } catch (err) {
-            results.errors.push(`Job ${j.cr21a_jobtitle}: ${String(err)}`);
-          }
-        }
-      }
-    }
-
-    // Clear pending after sync
-    pendingAccounts.length = 0;
-    pendingContacts.length = 0;
-    pendingJobs.length = 0;
-
-    // Refresh caches
-    await loadAccountsCache();
-    await loadContactsCache();
-
-    return results;
-  });
 }
 
-// Exported for other IPC handlers to queue pending items
-export function queueAccount(account: Record<string, unknown>) {
-  pendingAccounts.push(account);
-}
-
-export function queueContact(contact: Record<string, unknown>) {
-  pendingContacts.push(contact);
-}
-
-export function queueJob(job: Record<string, unknown>) {
-  pendingJobs.push(job);
-}
-
-export function getAccountByName(name: string) {
-  return accountsCache.get(name.toLowerCase().trim());
-}
-
-export function getContactByEmail(email: string) {
-  return contactsCache.get(email.toLowerCase().trim());
-}
-
-export { dynamicsFetch, fetchAllPaginated, loadAccountsCache, loadContactsCache, accountsCache };
+export { dynamicsFetch, fetchAllPaginated, accountsByName, existingJobLinks, ensureCaches };

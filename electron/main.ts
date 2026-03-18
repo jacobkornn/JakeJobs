@@ -1,14 +1,15 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import path from "path";
 import dotenv from "dotenv";
-import { registerDynamicsHandlers } from "./ipc/dynamics";
+import { registerDynamicsHandlers, ensureCaches } from "./ipc/dynamics";
 import { registerCareerflowHandlers } from "./ipc/careerflow";
 import { registerWizaHandlers } from "./ipc/wiza";
 import { registerClaudeHandlers } from "./ipc/claude";
 import { registerFileHandlers } from "./ipc/files";
 import { registerSettingsHandlers } from "./ipc/settings";
+import { registerGraphHandlers } from "./ipc/graph";
 
-dotenv.config({ path: path.join(__dirname, "..", ".env") });
+dotenv.config({ path: path.join(__dirname, "..", ".env"), override: true });
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -28,7 +29,6 @@ function createWindow() {
 
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
-    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
@@ -45,7 +45,13 @@ app.whenReady().then(() => {
   registerClaudeHandlers(ipcMain);
   registerFileHandlers(ipcMain);
   registerSettingsHandlers(ipcMain);
+  registerGraphHandlers(ipcMain);
   createWindow();
+
+  // Preload Dynamics cache on startup
+  ensureCaches().catch((err) => {
+    console.error("Failed to preload Dynamics cache:", err);
+  });
 });
 
 app.on("window-all-closed", () => {

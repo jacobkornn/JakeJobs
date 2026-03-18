@@ -6,8 +6,11 @@ const api = {
     getAccounts: () => ipcRenderer.invoke("dynamics:getAccounts"),
     getContacts: () => ipcRenderer.invoke("dynamics:getContacts"),
     getJobs: () => ipcRenderer.invoke("dynamics:getJobs"),
-    syncPending: () => ipcRenderer.invoke("dynamics:syncPending"),
-    getPendingCount: () => ipcRenderer.invoke("dynamics:getPendingCount"),
+    processJobBatch: (jobs: Array<Record<string, string>>) =>
+      ipcRenderer.invoke("dynamics:processJobBatch", jobs),
+    getBatchNewAccounts: () => ipcRenderer.invoke("dynamics:getBatchNewAccounts"),
+    getBatchNewJobs: () => ipcRenderer.invoke("dynamics:getBatchNewJobs"),
+    refreshCaches: () => ipcRenderer.invoke("dynamics:refreshCaches"),
   },
 
   // Careerflow (CSV import from Downloads)
@@ -22,8 +25,13 @@ const api = {
 
   // Wiza
   wiza: {
-    pullContacts: (params: { dateFrom: string; dateTo: string }) =>
+    getCredits: () => ipcRenderer.invoke("wiza:getCredits"),
+    enrichAccounts: (accounts: Array<{ name: string; domain?: string; id: string }>) =>
+      ipcRenderer.invoke("wiza:enrichAccounts", accounts),
+    pullContacts: (params: { items: Array<Record<string, string>>; listName?: string; enrichmentLevel?: string }) =>
       ipcRenderer.invoke("wiza:pullContacts", params),
+    processContacts: (contacts: Array<Record<string, string>>) =>
+      ipcRenderer.invoke("wiza:processContacts", contacts),
   },
 
   // Claude
@@ -43,6 +51,16 @@ const api = {
     getExportFiles: () => ipcRenderer.invoke("files:getExportFiles"),
     startDrag: (filePath: string) =>
       ipcRenderer.send("files:startDrag", filePath),
+  },
+
+  // Graph (Email send + reply tracking)
+  graph: {
+    sendEmail: (email: { to: string; subject: string; bodyHtml: string; contactId?: string; jobId?: string }) =>
+      ipcRenderer.invoke("graph:sendEmail", email),
+    checkReplies: () => ipcRenderer.invoke("graph:checkReplies"),
+    getTrackedEmails: () => ipcRenderer.invoke("graph:getTrackedEmails"),
+    loadTrackedEmails: () => ipcRenderer.invoke("graph:loadTrackedEmails"),
+    saveTrackedEmails: () => ipcRenderer.invoke("graph:saveTrackedEmails"),
   },
 
   // Settings

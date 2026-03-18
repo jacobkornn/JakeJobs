@@ -5,7 +5,7 @@ let client: Anthropic | null = null;
 
 function getClient(): Anthropic {
   if (!client) {
-    client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    client = new Anthropic({ apiKey: (process.env.ANTHROPIC_API_KEY || "").trim() });
   }
   return client;
 }
@@ -31,7 +31,7 @@ export function registerClaudeHandlers(ipcMain: IpcMain) {
     }));
 
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5-20250514",
+      model: "claude-sonnet-4-20250514",
       max_tokens: 4096,
       messages: [
         {
@@ -63,7 +63,7 @@ ${JSON.stringify(companyList, null, 2)}`,
     const anthropic = getClient();
 
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5-20250514",
+      model: "claude-sonnet-4-20250514",
       max_tokens: 1024,
       messages: [
         {
@@ -118,7 +118,7 @@ ${JSON.stringify(companies.slice(0, 50).map((c) => ({ name: c.name, domain: c.we
         );
 
         const response = await anthropic.messages.create({
-          model: "claude-sonnet-4-5-20250514",
+          model: "claude-sonnet-4-20250514",
           max_tokens: 4096,
           messages: [
             {

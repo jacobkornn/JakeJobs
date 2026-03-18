@@ -14,11 +14,16 @@ function ensureDirs() {
 }
 
 /**
- * Parse Excel serial date to JS Date
+ * Parse Excel serial date (UTC) to JS Date in local timezone.
+ * Careerflow stores "Date Added (UTC)" as Excel serial numbers.
+ * We convert to a local date so filtering by "today" matches the user's day.
  */
-function excelDateToJS(serial: number): Date {
-  const base = new Date(1899, 11, 30);
-  return new Date(base.getTime() + serial * 86400000);
+function excelDateToLocal(serial: number): Date {
+  // Excel epoch is 1899-12-30 UTC
+  const msFromEpoch = (serial - 25569) * 86400000; // 25569 = days from 1899-12-30 to 1970-01-01
+  const utcDate = new Date(msFromEpoch);
+  // Return a Date representing the local calendar date
+  return new Date(utcDate.getUTCFullYear(), utcDate.getUTCMonth(), utcDate.getUTCDate());
 }
 
 /**
@@ -26,7 +31,7 @@ function excelDateToJS(serial: number): Date {
  */
 function parseDate(value: unknown): Date | null {
   if (!value) return null;
-  if (typeof value === "number") return excelDateToJS(value);
+  if (typeof value === "number") return excelDateToLocal(value);
   if (typeof value === "string") {
     const d = new Date(value);
     return isNaN(d.getTime()) ? null : d;
@@ -55,7 +60,12 @@ function normalizeJob(row: Record<string, unknown>): Record<string, string> {
   const str = (v: unknown) => (v != null && String(v) !== "NaN" ? String(v).trim() : "");
   const dateStr = (v: unknown) => {
     const d = parseDate(v);
-    return d ? d.toISOString() : "";
+    if (!d) return "";
+    // Format as YYYY-MM-DD using local date components
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
   };
 
   return {
@@ -127,10 +137,13 @@ export function registerCareerflowHandlers(ipcMain: IpcMain) {
 
           const filtered = normalized.filter((job) => {
             if (!dateFrom && !dateTo) return true;
-            const jobDate = job.dateAdded ? new Date(job.dateAdded) : null;
-            if (!jobDate) return true;
-            if (dateFrom && jobDate < dateFrom) return false;
-            if (dateTo && jobDate > dateTo) return false;
+            if (!job.dateAdded) return false; // skip jobs without dates
+            const jobDate = new Date(job.dateAdded);
+            if (isNaN(jobDate.getTime())) return false;
+            // Compare date-only (strip time component)
+            const jobDateStr = jobDate.toISOString().slice(0, 10);
+            if (dateFrom && jobDateStr < params.dateFrom!) return false;
+            if (dateTo && jobDateStr > params.dateTo!) return false;
             return true;
           });
 

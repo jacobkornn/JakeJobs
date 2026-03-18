@@ -32,7 +32,9 @@ export default function FileGallery() {
   }, []);
 
   const handleDragStart = (e: React.DragEvent, file: ExportFile) => {
+    // Prevent the default browser drag behavior so Electron's native drag takes over
     e.preventDefault();
+    // Electron's startDrag initiates an OS-level file drag (like dragging from File Explorer)
     api?.files.startDrag(file.filePath);
   };
 
@@ -66,7 +68,7 @@ export default function FileGallery() {
           key={file.filePath}
           draggable
           onDragStart={(e) => handleDragStart(e, file)}
-          className="bg-gray-800 border border-gray-700 rounded-lg p-3 cursor-grab hover:border-blue-500/50 hover:bg-gray-750 transition-colors active:cursor-grabbing group"
+          className="bg-gray-800 border border-gray-700 rounded-lg p-3 cursor-grab hover:border-blue-500/50 hover:bg-gray-750 transition-colors active:cursor-grabbing group select-none"
         >
           <div className="flex items-start gap-2">
             <div className="text-2xl text-green-400 shrink-0">
