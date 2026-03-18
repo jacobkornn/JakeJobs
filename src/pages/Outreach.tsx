@@ -8,33 +8,60 @@ interface EmailDraft {
   company: string;
   subject: string;
   body: string;
+  originalSubject: string;
+  originalBody: string;
   edited: boolean;
   sent: boolean;
+  personalized: boolean;
+  personalizing: boolean;
   contactId?: string;
   jobId?: string;
+  leadType: string;
 }
 
-const DEFAULT_TEMPLATE = `Hi {{name}},
+const SALES_TEMPLATE = `<html><body>
+Hi {{firstname}},<br>
+<br>
+Hope this message finds you well! I recently applied for the {{jobtitle}} position at {{company}} and wanted to reach out directly. With a CS background and startup experience applying machine learning to sales and marketing, I bring technical depth plus strong communication skills. Given your role as {{contacttitle}}, I'd love to connect and learn more about navigating potential opportunities at {{company}}.<br>
+<br>
+Best,<br>
+Jacob Korn<br>
+<br>
+(425) 354-0440<br>
+<a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">My LinkedIn</a>
+</body></html>`;
 
-I came across {{company}} and was really impressed by what your team is building. I'm a software engineer with experience in full-stack development and sales engineering, and I'd love to explore how I might contribute to your team.
+const ENGINEERING_TEMPLATE = `<html><body>
+Hi {{firstname}},<br>
+<br>
+Hope this message finds you well! I recently applied for the {{jobtitle}} position at {{company}} and wanted to reach out directly. I am a software engineer with entrepreneurial experience building and applying machine learning to CRM data workflows. Given your role as {{contacttitle}}, I'd love to connect and learn more about navigating potential opportunities at {{company}}.<br>
+<br>
+Best,<br>
+Jacob Korn<br>
+<br>
+(425) 354-0440<br>
+<a href="https://www.linkedin.com/in/jacob-korn-3aa792248/">My LinkedIn</a>
+</body></html>`;
 
-Would you be open to a quick chat this week?
-
-Best,
-Jake`;
+function detectLeadType(jobTitle: string, contactTitle: string): string {
+  const combined = `${jobTitle} ${contactTitle}`.toLowerCase();
+  const salesKeywords = ["sales", "account executive", "bdr", "sdr", "business development", "revenue", "partnerships", "customer success", "solutions engineer", "sales engineer", "presales"];
+  if (salesKeywords.some((k) => combined.includes(k))) return "sales";
+  return "engineering";
+}
 
 export default function Outreach() {
   const [contacts, setContacts] = useState<Array<Record<string, string>>>([]);
   const [jobs, setJobs] = useState<Array<Record<string, string>>>([]);
-  const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
   const [drafts, setDrafts] = useState<EmailDraft[]>([]);
-  const [generating, setGenerating] = useState(false);
   const [sending, setSending] = useState<number | null>(null);
   const [messages, setMessages] = useState<StatusMessage[]>([]);
   const [selectedDraft, setSelectedDraft] = useState<number | null>(null);
   const [trackedEmails, setTrackedEmails] = useState<TrackedEmail[]>([]);
   const [replies, setReplies] = useState<EmailReply[]>([]);
   const [checkingReplies, setCheckingReplies] = useState(false);
+  const [attachResumes, setAttachResumes] = useState(true);
+  const [editingHtml, setEditingHtml] = useState(false);
 
   const addMessage = (text: string, type: StatusMessage["type"] = "info") => {
     setMessages((prev) => [
@@ -73,44 +100,123 @@ export default function Outreach() {
     }
   };
 
-  const handleGenerate = async () => {
-    if (!api || contacts.length === 0) return;
-    setGenerating(true);
+  // Stage all emails using templates (no Claude)
+  const handleStage = () => {
+    if (contacts.length === 0) return;
     setMessages([]);
-    setDrafts([]);
+
+    // Build job lookup by account ID (contact's parent account → job title)
+    const jobsByAccount = new Map<string, Record<string, string>>();
+    const jobsByCompanyName = new Map<string, Record<string, string>>();
+    for (const j of jobs) {
+      const accId = j._cr21a_jobposting_value;
+      if (accId && !jobsByAccount.has(accId)) jobsByAccount.set(accId, j);
+      const name = (j.accountName || j.cr21a_companyname || "").toLowerCase().trim();
+      if (name && !jobsByCompanyName.has(name)) jobsByCompanyName.set(name, j);
+    }
+
+    const emailDrafts: EmailDraft[] = [];
+
+    for (const contact of contacts) {
+      const email = contact.emailaddress1 || "";
+      if (!email) continue;
+
+      const firstname = contact.firstname || contact.fullname?.split(" ")[0] || "";
+      const contactTitle = contact.jobtitle || "";
+      const contactLeadType = contact.cr21a_leadtype || "";
+      const accountId = contact._parentcustomerid_value || "";
+
+      // Find related job - first by account ID, then by company name
+      const relatedJob = jobsByAccount.get(accountId)
+        || (contact.accountName ? jobsByCompanyName.get(contact.accountName.toLowerCase().trim()) : undefined);
+
+      // Resolve company name: account name → job's company name → empty
+      const accountName = contact.accountName || relatedJob?.accountName || relatedJob?.cr21a_companyname || "";
+      const jobTitle = relatedJob?.cr21a_jobtitle || "";
+
+      // Determine lead type: use Dynamics cr21a_leadtype if set, otherwise detect from titles
+      const leadType = contactLeadType
+        ? contactLeadType.toLowerCase()
+        : detectLeadType(jobTitle, contactTitle);
+      const template = leadType === "sales" ? SALES_TEMPLATE : ENGINEERING_TEMPLATE;
+
+      const body = template
+        .replace(/\{\{firstname\}\}/g, firstname)
+        .replace(/\{\{company\}\}/g, accountName)
+        .replace(/\{\{jobtitle\}\}/g, jobTitle)
+        .replace(/\{\{contacttitle\}\}/g, contactTitle);
+
+      const subject = `Introduction - Interested in ${accountName}`;
+
+      emailDrafts.push({
+        contactEmail: email,
+        contactName: contact.fullname || `${firstname} ${contact.lastname || ""}`.trim(),
+        company: accountName,
+        subject,
+        body,
+        originalSubject: subject,
+        originalBody: body,
+        edited: false,
+        sent: false,
+        personalized: false,
+        personalizing: false,
+        contactId: contact.contactid,
+        jobId: relatedJob?.cr21a_jobpostingid,
+        leadType,
+      });
+    }
+
+    setDrafts(emailDrafts);
+    if (emailDrafts.length > 0) setSelectedDraft(0);
+    addMessage(`Staged ${emailDrafts.length} emails from templates.`, "success");
+  };
+
+  // Personalize a single draft with Claude
+  const handlePersonalize = async (index: number) => {
+    if (!api) return;
+    const draft = drafts[index];
+    if (!draft || draft.sent || draft.personalizing) return;
+
+    setDrafts((prev) =>
+      prev.map((d, i) => (i === index ? { ...d, personalizing: true } : d))
+    );
 
     try {
-      addMessage(`Personalizing emails for ${contacts.length} contacts with Claude...`);
+      const contact = contacts.find(
+        (c) => (c.email || c.emailaddress1 || "").toLowerCase() === draft.contactEmail.toLowerCase()
+      );
+
+      const relatedJobs = jobs.filter(
+        (j) => (j.accountName || j.cr21a_companyname || j.companyName || j.company || "").toLowerCase() === draft.company.toLowerCase()
+      );
 
       const result = await api.claude.personalizeEmails({
-        contacts,
-        template,
-        jobs,
+        contacts: contact ? [contact] : [],
+        template: draft.body,
+        jobs: relatedJobs,
+        leadType: draft.leadType,
       });
 
-      const emailDrafts: EmailDraft[] = result.map((r) => {
-        const contact = contacts.find(
-          (c) => (c.email || c.emailaddress1 || "").toLowerCase() === r.contactEmail.toLowerCase()
+      if (result.length > 0) {
+        setDrafts((prev) =>
+          prev.map((d, i) =>
+            i === index
+              ? { ...d, subject: result[0].subject, body: result[0].body, personalized: true, personalizing: false }
+              : d
+          )
         );
-        return {
-          contactEmail: r.contactEmail,
-          contactName: contact?.fullname || contact?.name || r.contactEmail,
-          company: contact?.company || "",
-          subject: r.subject,
-          body: r.body,
-          edited: false,
-          sent: false,
-          contactId: contact?.id,
-          jobId: undefined,
-        };
-      });
-
-      setDrafts(emailDrafts);
-      addMessage(`Generated ${emailDrafts.length} personalized drafts.`, "success");
+        addMessage(`Personalized email for ${draft.contactName}.`, "success");
+      } else {
+        setDrafts((prev) =>
+          prev.map((d, i) => (i === index ? { ...d, personalizing: false } : d))
+        );
+        addMessage(`Claude returned no result for ${draft.contactName}.`, "warning");
+      }
     } catch (err) {
-      addMessage(`Error: ${String(err)}`, "error");
-    } finally {
-      setGenerating(false);
+      setDrafts((prev) =>
+        prev.map((d, i) => (i === index ? { ...d, personalizing: false } : d))
+      );
+      addMessage(`Personalization failed for ${draft.contactName}: ${String(err)}`, "error");
     }
   };
 
@@ -127,12 +233,19 @@ export default function Outreach() {
 
     setSending(index);
     try {
+      // Load attachments based on lead type
+      let attachments: Array<{ name: string; contentBytes: string; contentType: string }> = [];
+      if (attachResumes) {
+        attachments = await api.files.getAttachments(draft.leadType);
+      }
+
       const result = await api.graph.sendEmail({
         to: draft.contactEmail,
         subject: draft.subject,
-        bodyHtml: draft.body.replace(/\n/g, "<br>"),
+        bodyHtml: draft.body,
         contactId: draft.contactId,
         jobId: draft.jobId,
+        attachments,
       });
 
       if (result.success) {
@@ -143,7 +256,7 @@ export default function Outreach() {
           setTrackedEmails((prev) => [...prev, result.tracked!]);
         }
         await api.graph.saveTrackedEmails();
-        addMessage(`Sent email to ${draft.contactEmail}`, "success");
+        addMessage(`Sent to ${draft.contactEmail} (${draft.leadType})`, "success");
       }
     } catch (err) {
       addMessage(`Failed to send to ${draft.contactEmail}: ${String(err)}`, "error");
@@ -181,11 +294,9 @@ export default function Outreach() {
     }
   };
 
-  // Check if a contact has already been emailed (in tracked list)
   const isTracked = (email: string) =>
     trackedEmails.some((t) => t.to.toLowerCase() === email.toLowerCase());
 
-  // Check if a contact has replied
   const hasReply = (email: string) =>
     replies.some((r) => r.replyFrom.toLowerCase() === email.toLowerCase());
 
@@ -193,29 +304,17 @@ export default function Outreach() {
     <div className="p-8">
       <h2 className="text-2xl font-bold text-white mb-1">Outreach</h2>
       <p className="text-sm text-gray-500 mb-6">
-        Claude personalizes your email template per company/role. Send via Microsoft Graph.
+        Personalized emails with resume/cover letter attached per lead type (sales vs engineering)
       </p>
 
-      {/* Template editor */}
-      <div className="mb-6">
-        <label className="block text-xs text-gray-500 mb-2">
-          Base Email Template (use {"{{name}}"} and {"{{company}}"} as placeholders)
-        </label>
-        <textarea
-          value={template}
-          onChange={(e) => setTemplate(e.target.value)}
-          rows={8}
-          className="w-full max-w-2xl bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
-        />
-      </div>
-
+      {/* Controls */}
       <div className="flex items-center gap-4 mb-4">
         <button
-          onClick={handleGenerate}
-          disabled={generating || contacts.length === 0}
+          onClick={handleStage}
+          disabled={contacts.length === 0}
           className="px-5 py-2 bg-orange-600 hover:bg-orange-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded transition-colors"
         >
-          {generating ? "Generating..." : `Personalize for ${contacts.length} contacts`}
+          Stage {contacts.length} emails
         </button>
         <button
           onClick={loadData}
@@ -223,6 +322,15 @@ export default function Outreach() {
         >
           Refresh contacts
         </button>
+        <label className="flex items-center gap-2 text-sm text-gray-400 ml-4">
+          <input
+            type="checkbox"
+            checked={attachResumes}
+            onChange={(e) => setAttachResumes(e.target.checked)}
+            className="rounded"
+          />
+          Attach resume + cover letter
+        </label>
       </div>
 
       <StatusFeed messages={messages} />
@@ -292,6 +400,19 @@ export default function Outreach() {
                 >
                   <div className="flex items-center gap-2">
                     <p className="text-sm text-gray-200 truncate flex-1">{draft.contactName}</p>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                      draft.leadType === "sales"
+                        ? "text-orange-400 bg-orange-900/30"
+                        : "text-blue-400 bg-blue-900/30"
+                    }`}>
+                      {draft.leadType}
+                    </span>
+                    {draft.personalized && (
+                      <span className="text-[10px] text-purple-400 shrink-0">AI</span>
+                    )}
+                    {draft.personalizing && (
+                      <span className="text-[10px] text-purple-300 shrink-0 animate-pulse">...</span>
+                    )}
                     {draft.sent && (
                       <span className="text-[10px] text-green-400 shrink-0">sent</span>
                     )}
@@ -304,6 +425,7 @@ export default function Outreach() {
                       <span className="text-[10px] text-yellow-400 shrink-0">prev sent</span>
                     )}
                   </div>
+                  <p className="text-xs text-orange-400 truncate">{contacts.find((c) => (c.emailaddress1 || "").toLowerCase() === draft.contactEmail.toLowerCase())?.jobtitle || ""}</p>
                   <p className="text-xs text-gray-500 truncate">{draft.company}</p>
                   {draft.edited && !draft.sent && (
                     <span className="text-[10px] text-yellow-500">edited</span>
@@ -315,9 +437,18 @@ export default function Outreach() {
             {/* Draft editor */}
             {selectedDraft !== null && drafts[selectedDraft] && (
               <div className="flex-1 border border-gray-800 rounded-lg p-4">
-                <div className="mb-3">
-                  <label className="text-xs text-gray-500">To</label>
-                  <p className="text-sm text-gray-300">{drafts[selectedDraft].contactEmail}</p>
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="flex-1">
+                    <label className="text-xs text-gray-500">To</label>
+                    <p className="text-sm text-gray-300">{drafts[selectedDraft].contactEmail}</p>
+                  </div>
+                  <span className={`text-xs px-2 py-1 rounded ${
+                    drafts[selectedDraft].leadType === "sales"
+                      ? "text-orange-400 bg-orange-900/30"
+                      : "text-blue-400 bg-blue-900/30"
+                  }`}>
+                    {drafts[selectedDraft].leadType} template
+                  </span>
                 </div>
                 <div className="mb-3">
                   <label className="text-xs text-gray-500">Subject</label>
@@ -330,15 +461,36 @@ export default function Outreach() {
                   />
                 </div>
                 <div className="mb-4">
-                  <label className="text-xs text-gray-500">Body</label>
-                  <textarea
-                    value={drafts[selectedDraft].body}
-                    onChange={(e) => updateDraft(selectedDraft, "body", e.target.value)}
-                    disabled={drafts[selectedDraft].sent}
-                    rows={12}
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 mt-1 font-mono disabled:opacity-50"
-                  />
+                  <div className="flex items-center gap-2 mb-1">
+                    <label className="text-xs text-gray-500">Body</label>
+                    {!drafts[selectedDraft].sent && (
+                      <button
+                        onClick={() => setEditingHtml(!editingHtml)}
+                        className="text-[10px] text-gray-500 hover:text-gray-300 underline"
+                      >
+                        {editingHtml ? "Preview" : "Edit HTML"}
+                      </button>
+                    )}
+                  </div>
+                  {editingHtml && !drafts[selectedDraft].sent ? (
+                    <textarea
+                      value={drafts[selectedDraft].body}
+                      onChange={(e) => updateDraft(selectedDraft, "body", e.target.value)}
+                      rows={12}
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500 font-mono"
+                    />
+                  ) : (
+                    <div
+                      className="w-full bg-white rounded px-4 py-3 text-sm text-gray-900 border border-gray-300 min-h-[200px] overflow-auto prose prose-sm max-w-none"
+                      dangerouslySetInnerHTML={{ __html: drafts[selectedDraft].body }}
+                    />
+                  )}
                 </div>
+                {attachResumes && (
+                  <p className="text-xs text-gray-600 mb-3">
+                    Attachments: Jacob_Korn_Resume.pdf, Jacob_Korn_CoverLetter.pdf ({drafts[selectedDraft].leadType})
+                  </p>
+                )}
                 {drafts[selectedDraft].sent ? (
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-green-400">Sent</span>
@@ -349,13 +501,40 @@ export default function Outreach() {
                     )}
                   </div>
                 ) : (
-                  <button
-                    onClick={() => handleSendEmail(selectedDraft)}
-                    disabled={sending === selectedDraft}
-                    className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white text-sm rounded transition-colors"
-                  >
-                    {sending === selectedDraft ? "Sending..." : "Send via Graph"}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    {drafts[selectedDraft].personalized ? (
+                      <button
+                        onClick={() => {
+                          setDrafts((prev) =>
+                            prev.map((d, i) =>
+                              i === selectedDraft
+                                ? { ...d, subject: d.originalSubject, body: d.originalBody, personalized: false, edited: false }
+                                : d
+                            )
+                          );
+                          addMessage(`Reverted email for ${drafts[selectedDraft].contactName}.`, "info");
+                        }}
+                        className="px-4 py-1.5 bg-gray-600 hover:bg-gray-500 text-white text-sm rounded transition-colors"
+                      >
+                        Revert to original
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handlePersonalize(selectedDraft)}
+                        disabled={drafts[selectedDraft].personalizing}
+                        className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm rounded transition-colors"
+                      >
+                        {drafts[selectedDraft].personalizing ? "Personalizing..." : "Personalize with Claude"}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleSendEmail(selectedDraft)}
+                      disabled={sending === selectedDraft}
+                      className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white text-sm rounded transition-colors"
+                    >
+                      {sending === selectedDraft ? "Sending..." : "Send via Graph"}
+                    </button>
+                  </div>
                 )}
               </div>
             )}

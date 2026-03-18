@@ -132,4 +132,29 @@ export function registerFileHandlers(ipcMain: IpcMain) {
   ipcMain.on("files:startDrag", (event, filePath: string) => {
     event.sender.startDrag({ file: filePath, icon: iconPath });
   });
+
+  // Load resume/cover letter attachments for a given lead type
+  ipcMain.handle("files:getAttachments", async (_event, leadType: string) => {
+    const WIZA_DATA = path.join(__dirname, "..", "..", "..", "Wiza", "Data");
+    const lt = (leadType || "").trim().toLowerCase();
+    const dir = lt === "sales" ? path.join(WIZA_DATA, "Sales") : path.join(WIZA_DATA, "Software");
+
+    const resume = path.join(dir, "Jacob_Korn_Resume.pdf");
+    const cover = path.join(dir, "Jacob_Korn_CoverLetter.pdf");
+
+    const attachments: Array<{ name: string; contentBytes: string; contentType: string }> = [];
+
+    for (const filePath of [resume, cover]) {
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath);
+        attachments.push({
+          name: path.basename(filePath),
+          contentBytes: content.toString("base64"),
+          contentType: "application/pdf",
+        });
+      }
+    }
+
+    return attachments;
+  });
 }

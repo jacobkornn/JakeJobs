@@ -119,7 +119,7 @@ async function ensureCaches(): Promise<void> {
   );
   accountsByName.clear();
   for (const acc of accounts) {
-    const key = acc.name?.toLowerCase().trim();
+    const key = normalizeName(acc.name || "");
     if (key) {
       accountsByName.set(key, {
         id: acc.accountid,
@@ -143,10 +143,27 @@ async function ensureCaches(): Promise<void> {
   cachesLoaded = true;
 }
 
+// ─── Name normalization for deduplication ───
+
+function normalizeName(name: string): string {
+  let s = name.trim().toLowerCase().replace(/\u00a0/g, " ");
+  s = s.replace(/&/g, " and ").replace(/[.,'']/g, "").replace(/\s+/g, " ").trim();
+  s = s.replace(/\s*[-–—]\s*(us|usa|u\.s\.a\.|north america|na)$/, "").trim();
+  const suffixes = [" inc", " incorporated", " llc", " ltd", " limited", " co", " company", " corp", " corporation", " plc", " gmbh", " sa"];
+  let changed = true;
+  while (changed && s) {
+    changed = false;
+    for (const suf of suffixes) {
+      if (s.endsWith(suf)) { s = s.slice(0, -suf.length).trim(); changed = true; }
+    }
+  }
+  return s.replace(/\s+/g, " ").trim();
+}
+
 // ─── Account upsert (cache-first, API create if new) ───
 
 async function upsertAccount(name: string, website?: string): Promise<CachedAccount> {
-  const key = name.toLowerCase().trim();
+  const key = normalizeName(name);
   const existing = accountsByName.get(key);
   if (existing) return existing;
 
@@ -238,21 +255,55 @@ export function registerDynamicsHandlers(ipcMain: IpcMain) {
   });
 
   ipcMain.handle("dynamics:getContacts", async () => {
+    await ensureCaches();
+
     const contacts = await fetchAllPaginated<Record<string, string>>(
-      "/contacts?$select=contactid,fullname,emailaddress1,_parentcustomerid_value"
+      "/contacts?$select=contactid,firstname,lastname,fullname,emailaddress1,jobtitle,cr21a_leadtype,_parentcustomerid_value,createdon"
     );
-    return contacts.map((c) => ({
-      id: c.contactid,
-      name: c.fullname,
-      email: c.emailaddress1,
-      accountId: c._parentcustomerid_value,
-    }));
+
+    // Resolve account names from cache
+    const accountById = new Map<string, CachedAccount>();
+    for (const a of accountsByName.values()) {
+      accountById.set(a.id, a);
+    }
+
+    return contacts.map((c) => {
+      const account = c._parentcustomerid_value ? accountById.get(c._parentcustomerid_value) : undefined;
+      return {
+        contactid: c.contactid,
+        firstname: c.firstname || "",
+        lastname: c.lastname || "",
+        fullname: c.fullname || "",
+        emailaddress1: c.emailaddress1 || "",
+        jobtitle: c.jobtitle || "",
+        cr21a_leadtype: c.cr21a_leadtype || "",
+        _parentcustomerid_value: c._parentcustomerid_value || "",
+        accountName: account?.name || "",
+        createdon: c.createdon || "",
+      };
+    });
   });
 
   ipcMain.handle("dynamics:getJobs", async () => {
-    return fetchAllPaginated(
-      "/cr21a_jobpostings?$select=cr21a_jobpostingid,cr21a_jobtitle,cr21a_companyname,cr21a_location,cr21a_joblink,cr21a_dateadded&$orderby=cr21a_dateadded desc"
+    await ensureCaches();
+
+    const jobs = await fetchAllPaginated<Record<string, string>>(
+      "/cr21a_jobpostings?$select=cr21a_jobpostingid,cr21a_jobtitle,cr21a_companyname,cr21a_location,cr21a_joblink,cr21a_dateadded,_cr21a_jobposting_value&$orderby=cr21a_dateadded desc"
     );
+
+    // Resolve account names
+    const accountById = new Map<string, CachedAccount>();
+    for (const a of accountsByName.values()) {
+      accountById.set(a.id, a);
+    }
+
+    return jobs.map((j) => {
+      const account = j._cr21a_jobposting_value ? accountById.get(j._cr21a_jobposting_value) : undefined;
+      return {
+        ...j,
+        accountName: account?.name || j.cr21a_companyname || "",
+      };
+    });
   });
 
   /**

@@ -40,17 +40,22 @@ export interface CareerflowApi {
   browseFiles: () => Promise<string[]>;
 }
 
+export interface WizaList {
+  id: number;
+  name: string;
+  status: string;
+  created_at: string;
+  finished_at?: string;
+  stats?: { people?: number; credits?: number };
+  enrichment_level?: string;
+}
+
 export interface WizaApi {
   getCredits: () => Promise<{ credits: Record<string, unknown> }>;
-  enrichAccounts: (accounts: Array<{ name: string; domain?: string; id: string }>) =>
-    Promise<{ enriched: number; skipped: number; errors: string[] }>;
-  pullContacts: (params: {
-    items: Array<Record<string, string>>;
-    listName?: string;
-    enrichmentLevel?: string;
-  }) => Promise<{ contacts: Array<Record<string, unknown>>; listId: number; count: number; message?: string }>;
+  getList: (listId: number) => Promise<WizaList>;
+  getListContacts: (listId: number) => Promise<{ contacts: Array<Record<string, unknown>>; count: number }>;
   processContacts: (contacts: Array<Record<string, string>>) =>
-    Promise<{ created: number; existing: number; errors: string[] }>;
+    Promise<{ created: number; existing: number; noEmail: number; matched: number; unmatched: number; errors: string[] }>;
 }
 
 export interface ClaudeApi {
@@ -64,6 +69,7 @@ export interface ClaudeApi {
     contacts: Array<Record<string, string>>;
     template: string;
     jobs: Array<Record<string, string>>;
+    leadType?: string;
   }) => Promise<Array<{ contactEmail: string; subject: string; body: string }>>;
 }
 
@@ -82,6 +88,7 @@ export interface FilesApi {
     }>
   >;
   startDrag: (filePath: string) => void;
+  getAttachments: (leadType: string) => Promise<Array<{ name: string; contentBytes: string; contentType: string }>>;
 }
 
 export interface TrackedEmail {
@@ -109,6 +116,7 @@ export interface GraphApi {
     bodyHtml: string;
     contactId?: string;
     jobId?: string;
+    attachments?: Array<{ name: string; contentBytes: string; contentType: string }>;
   }) => Promise<{ success: boolean; tracked: TrackedEmail | null }>;
   checkReplies: () => Promise<EmailReply[]>;
   getTrackedEmails: () => Promise<TrackedEmail[]>;

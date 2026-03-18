@@ -26,10 +26,8 @@ const api = {
   // Wiza
   wiza: {
     getCredits: () => ipcRenderer.invoke("wiza:getCredits"),
-    enrichAccounts: (accounts: Array<{ name: string; domain?: string; id: string }>) =>
-      ipcRenderer.invoke("wiza:enrichAccounts", accounts),
-    pullContacts: (params: { items: Array<Record<string, string>>; listName?: string; enrichmentLevel?: string }) =>
-      ipcRenderer.invoke("wiza:pullContacts", params),
+    getList: (listId: number) => ipcRenderer.invoke("wiza:getList", listId),
+    getListContacts: (listId: number) => ipcRenderer.invoke("wiza:getListContacts", listId),
     processContacts: (contacts: Array<Record<string, string>>) =>
       ipcRenderer.invoke("wiza:processContacts", contacts),
   },
@@ -40,7 +38,7 @@ const api = {
       ipcRenderer.invoke("claude:deduplicateCompanies", jobs),
     suggestJobTitles: (companies: unknown[]) =>
       ipcRenderer.invoke("claude:suggestJobTitles", companies),
-    personalizeEmails: (params: { contacts: unknown[]; template: string; jobs: unknown[] }) =>
+    personalizeEmails: (params: { contacts: unknown[]; template: string; jobs: unknown[]; leadType?: string }) =>
       ipcRenderer.invoke("claude:personalizeEmails", params),
   },
 
@@ -51,11 +49,13 @@ const api = {
     getExportFiles: () => ipcRenderer.invoke("files:getExportFiles"),
     startDrag: (filePath: string) =>
       ipcRenderer.send("files:startDrag", filePath),
+    getAttachments: (leadType: string) =>
+      ipcRenderer.invoke("files:getAttachments", leadType),
   },
 
   // Graph (Email send + reply tracking)
   graph: {
-    sendEmail: (email: { to: string; subject: string; bodyHtml: string; contactId?: string; jobId?: string }) =>
+    sendEmail: (email: { to: string; subject: string; bodyHtml: string; contactId?: string; jobId?: string; attachments?: Array<{ name: string; contentBytes: string; contentType: string }> }) =>
       ipcRenderer.invoke("graph:sendEmail", email),
     checkReplies: () => ipcRenderer.invoke("graph:checkReplies"),
     getTrackedEmails: () => ipcRenderer.invoke("graph:getTrackedEmails"),

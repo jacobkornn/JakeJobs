@@ -65,12 +65,19 @@ function getUserPrincipal(): string {
   return email;
 }
 
+export interface EmailAttachment {
+  name: string;
+  contentBytes: string; // base64
+  contentType: string;
+}
+
 export interface OutboundEmail {
   to: string;
   subject: string;
   bodyHtml: string;
   contactId?: string;
   jobId?: string;
+  attachments?: EmailAttachment[];
 }
 
 export interface TrackedEmail {
@@ -94,7 +101,7 @@ export function registerGraphHandlers(ipcMain: IpcMain) {
   ipcMain.handle("graph:sendEmail", async (_event, email: OutboundEmail) => {
     const user = getUserPrincipal();
 
-    const message = {
+    const message: Record<string, unknown> = {
       message: {
         subject: email.subject,
         body: {
@@ -106,6 +113,12 @@ export function registerGraphHandlers(ipcMain: IpcMain) {
             emailAddress: { address: email.to },
           },
         ],
+        attachments: (email.attachments || []).map((a) => ({
+          "@odata.type": "#microsoft.graph.fileAttachment",
+          name: a.name,
+          contentType: a.contentType,
+          contentBytes: a.contentBytes,
+        })),
       },
       saveToSentItems: true,
     };
