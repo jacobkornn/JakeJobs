@@ -127,6 +127,7 @@ export interface GraphApi {
     attachments?: Array<{ name: string; contentBytes: string; contentType: string }>;
   }) => Promise<{ success: boolean; tracked: TrackedEmail | null }>;
   checkReplies: () => Promise<EmailReply[]>;
+  getMessageBody: (messageId: string) => Promise<{ body: string; subject: string; sentAt: string }>;
   getTrackedEmails: () => Promise<TrackedEmail[]>;
   loadTrackedEmails: () => Promise<number>;
   saveTrackedEmails: () => Promise<number>;

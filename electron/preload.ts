@@ -62,6 +62,7 @@ const api = {
     sendEmail: (email: { to: string; subject: string; bodyHtml: string; contactId?: string; jobId?: string; attachments?: Array<{ name: string; contentBytes: string; contentType: string }> }) =>
       ipcRenderer.invoke("graph:sendEmail", email),
     checkReplies: () => ipcRenderer.invoke("graph:checkReplies"),
+    getMessageBody: (messageId: string) => ipcRenderer.invoke("graph:getMessageBody", messageId),
     getTrackedEmails: () => ipcRenderer.invoke("graph:getTrackedEmails"),
     loadTrackedEmails: () => ipcRenderer.invoke("graph:loadTrackedEmails"),
     saveTrackedEmails: () => ipcRenderer.invoke("graph:saveTrackedEmails"),

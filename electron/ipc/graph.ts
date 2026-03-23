@@ -236,6 +236,27 @@ export function registerGraphHandlers(ipcMain: IpcMain) {
   });
 
   /**
+   * Fetch the HTML body of a sent message by its messageId.
+   * Used to include original email content in follow-up replies.
+   */
+  ipcMain.handle("graph:getMessageBody", async (_event, messageId: string) => {
+    const user = getUserPrincipal();
+    const res = await graphFetch(
+      `/users/${user}/messages/${messageId}?$select=body,subject,sentDateTime,toRecipients`
+    );
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Failed to fetch message: ${res.status} ${errText}`);
+    }
+    const msg = await res.json();
+    return {
+      body: msg.body?.content || "",
+      subject: msg.subject || "",
+      sentAt: msg.sentDateTime || "",
+    };
+  });
+
+  /**
    * Save tracked emails to disk
    */
   ipcMain.handle("graph:saveTrackedEmails", async () => {

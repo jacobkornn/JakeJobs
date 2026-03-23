@@ -4,6 +4,7 @@ import PullJobs from "./pages/PullJobs";
 import ExportAccounts from "./pages/ExportAccounts";
 import PullContacts from "./pages/PullContacts";
 import Outreach from "./pages/Outreach";
+import FollowUp from "./pages/FollowUp";
 import SyncButton from "./components/SyncButton";
 
 function App() {
@@ -22,6 +23,7 @@ function App() {
           <NavItem to="/export-accounts" label="Export Accounts" icon="upload" />
           <NavItem to="/pull-contacts" label="Pull from Wiza" icon="users" />
           <NavItem to="/outreach" label="Outreach" icon="mail" />
+          <NavItem to="/follow-up" label="Follow-Up" icon="reply" />
         </div>
 
         <div className="p-3 border-t border-gray-800">
@@ -37,6 +39,7 @@ function App() {
           <Route path="/export-accounts" element={<ExportAccounts />} />
           <Route path="/pull-contacts" element={<PullContacts />} />
           <Route path="/outreach" element={<Outreach />} />
+          <Route path="/follow-up" element={<FollowUp />} />
         </Routes>
       </main>
     </div>
@@ -50,6 +53,7 @@ function NavItem({ to, label, icon }: { to: string; label: string; icon: string 
     upload: "\u2B06",
     users: "\u263A",
     mail: "\u2709",
+    reply: "\u21A9",
   };
 
   return (
