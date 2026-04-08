@@ -431,12 +431,17 @@ export function registerDynamicsHandlers(ipcMain: IpcMain) {
             participationtypemask: 2, // TO
           },
         ],
-        "regardingobjectid_contact@odata.bind": `/contacts(${params.contactId})`,
       };
 
+      // regardingobjectid is a single-valued navigation property — only one
+      // bind is allowed. Prefer the job posting (richer context) and fall
+      // back to the contact.
       if (params.jobPostingId) {
         payload["regardingobjectid_cr21a_jobposting@odata.bind"] =
           `/cr21a_jobpostings(${params.jobPostingId})`;
+      } else {
+        payload["regardingobjectid_contact@odata.bind"] =
+          `/contacts(${params.contactId})`;
       }
 
       const res = await dynamicsFetch("/emails", {
@@ -450,6 +455,80 @@ export function registerDynamicsHandlers(ipcMain: IpcMain) {
       }
 
       return { success: true };
+    }
+  );
+
+  /**
+   * Fetch sent email activities from Dynamics as the source of truth for
+   * tracked outbound emails. Filters to outgoing messages owned by the given
+   * systemuser (Jake) and expands parties to extract the recipient address.
+   */
+  ipcMain.handle(
+    "dynamics:getSentEmails",
+    async (_event, senderSystemUserId: string) => {
+      if (!senderSystemUserId) throw new Error("senderSystemUserId required");
+      // Filter on the FROM party (participationtypemask=1) because records
+      // created via client-credentials auth are owned by the app user, not
+      // the sender. This matches on the actual "from" systemuser reference.
+      const filter =
+        `directioncode eq true and email_activity_parties/any(` +
+        `p:p/participationtypemask eq 1 and p/_partyid_value eq ${senderSystemUserId})`;
+      const url =
+        `/emails?$filter=${encodeURIComponent(filter)}` +
+        `&$select=activityid,subject,description,createdon,actualend,_regardingobjectid_value` +
+        `&$expand=email_activity_parties($select=addressused,participationtypemask,_partyid_value)` +
+        `&$orderby=createdon desc&$top=500`;
+      const res = await dynamicsFetch(url);
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Failed to fetch sent emails: ${res.status} ${errText}`);
+      }
+      const data = await res.json();
+
+      const results: Array<{
+        messageId: string;
+        conversationId: string;
+        to: string;
+        subject: string;
+        body: string;
+        sentAt: string;
+        contactId?: string;
+        jobId?: string;
+      }> = [];
+
+      for (const email of data.value || []) {
+        const parties = email.email_activity_parties || [];
+        const toParty = parties.find(
+          (p: { participationtypemask?: number }) => p.participationtypemask === 2
+        );
+        const toAddress = toParty?.addressused;
+        if (!toAddress) continue;
+
+        const regardingType =
+          email["_regardingobjectid_value@Microsoft.Dynamics.CRM.lookuplogicalname"];
+        const regardingId = email._regardingobjectid_value;
+
+        // Contact id: prefer TO party's partyid (always a contact in our flow),
+        // else fall back to regardingobject if it is a contact.
+        const partyContactId = toParty?._partyid_value;
+        const contactId =
+          partyContactId || (regardingType === "contact" ? regardingId : undefined);
+        const jobId =
+          regardingType === "cr21a_jobposting" ? regardingId : undefined;
+
+        results.push({
+          messageId: email.activityid,
+          conversationId: "",
+          to: toAddress,
+          subject: email.subject || "",
+          body: email.description || "",
+          sentAt: email.actualend || email.createdon,
+          contactId,
+          jobId,
+        });
+      }
+
+      return results;
     }
   );
 }

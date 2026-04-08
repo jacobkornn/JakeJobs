@@ -26,7 +26,6 @@ Hi {{firstname}},<br>
 Just wanted to make sure you saw my message. I'd love to connect and learn more about {{company}} and the {{jobtitle}} position available! Just let me know if there is a time that works for you for a quick chat.<br>
 <br>
 Best,<br>
-<br>
 Jacob Korn<br>
 <br>
 (425) 354-0440<br>
@@ -68,15 +67,21 @@ export default function FollowUp() {
 
   useEffect(() => {
     loadAll();
-    if (api) {
-      api.dynamics.getSystemUserId("jake.korn@theboxk.com").then(setSystemUserId).catch(() => {});
-    }
   }, []);
 
   const loadAll = async () => {
+    if (!api) return;
     setLoading(true);
-    await Promise.all([loadData(), loadTracking()]);
-    setLoading(false);
+    try {
+      // Resolve the systemuser first — tracked emails are filtered by owner.
+      const uid = await api.dynamics
+        .getSystemUserId("jake.korn@theboxk.com")
+        .catch(() => null);
+      setSystemUserId(uid);
+      await Promise.all([loadData(), loadTracking(uid)]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const loadData = async () => {
@@ -93,14 +98,13 @@ export default function FollowUp() {
     }
   };
 
-  const loadTracking = async () => {
-    if (!api) return;
+  const loadTracking = async (uid: string | null) => {
+    if (!api || !uid) return;
     try {
-      await api.graph.loadTrackedEmails();
-      const tracked = await api.graph.getTrackedEmails();
+      const tracked = await api.dynamics.getSentEmails(uid);
       setTrackedEmails(tracked);
     } catch (err) {
-      console.error("Failed to load tracked emails:", err);
+      console.error("Failed to load tracked emails from Dynamics:", err);
     }
   };
 
@@ -108,7 +112,7 @@ export default function FollowUp() {
     if (!api) return;
     setCheckingReplies(true);
     try {
-      const newReplies = await api.graph.checkReplies();
+      const newReplies = await api.graph.checkReplies(trackedEmails);
       setReplies(newReplies);
       if (newReplies.length > 0) {
         addMessage(`Found ${newReplies.length} reply(ies)!`, "success");
@@ -190,14 +194,8 @@ export default function FollowUp() {
       const jobTitle = job?.cr21a_jobtitle || "";
       const leadType = contact?.cr21a_leadtype?.toLowerCase() || "engineering";
 
-      // Fetch original sent email body for conversation history
-      let originalEmailHtml = "";
-      try {
-        const original = await api.graph.getMessageBody(tracked.messageId);
-        originalEmailHtml = original.body;
-      } catch (err) {
-        addMessage(`Could not fetch original email for ${contactName}: ${String(err)}`, "warning");
-      }
+      // Original body is stored on the Dynamics email activity (description field).
+      const originalEmailHtml = tracked.body || "";
 
       // Build follow-up body with conversation thread
       const followUpBody = FOLLOWUP_TEMPLATE
@@ -271,12 +269,10 @@ export default function FollowUp() {
         setDrafts((prev) =>
           prev.map((d, i) => (i === index ? { ...d, sent: true } : d))
         );
-        if (result.tracked) {
-          setTrackedEmails((prev) => [...prev, result.tracked!]);
-        }
-        await api.graph.saveTrackedEmails();
 
-        // Log follow-up activity in Dynamics
+        // Log follow-up activity in Dynamics (this is the source of truth
+        // for tracked emails). Refresh the tracked list afterward so the
+        // newly-sent follow-up replaces the stale original in the view.
         if (systemUserId && draft.contactId) {
           try {
             await api.dynamics.logEmailActivity({
@@ -286,6 +282,7 @@ export default function FollowUp() {
               senderSystemUserId: systemUserId,
               jobPostingId: draft.jobId,
             });
+            await loadTracking(systemUserId);
           } catch (err) {
             addMessage(`Sent but failed to log activity in Dynamics: ${String(err)}`, "warning");
           }

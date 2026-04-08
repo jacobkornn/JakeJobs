@@ -24,6 +24,7 @@ export interface DynamicsApi {
     senderSystemUserId: string;
     jobPostingId?: string;
   }) => Promise<{ success: boolean }>;
+  getSentEmails: (senderSystemUserId: string) => Promise<TrackedEmail[]>;
 }
 
 export interface DownloadFile {
@@ -107,6 +108,8 @@ export interface TrackedEmail {
   sentAt: string;
   contactId?: string;
   jobId?: string;
+  /** HTML body. Populated when sourced from Dynamics email activities. */
+  body?: string;
 }
 
 export interface EmailReply {
@@ -126,11 +129,23 @@ export interface GraphApi {
     jobId?: string;
     attachments?: Array<{ name: string; contentBytes: string; contentType: string }>;
   }) => Promise<{ success: boolean; tracked: TrackedEmail | null }>;
-  checkReplies: () => Promise<EmailReply[]>;
+  checkReplies: (tracked: TrackedEmail[]) => Promise<EmailReply[]>;
   getMessageBody: (messageId: string) => Promise<{ body: string; subject: string; sentAt: string }>;
   getTrackedEmails: () => Promise<TrackedEmail[]>;
   loadTrackedEmails: () => Promise<number>;
   saveTrackedEmails: () => Promise<number>;
+  backfillSentEmails: (params: {
+    senderSystemUserId: string;
+    sinceIso?: string;
+    maxMessages?: number;
+  }) => Promise<{
+    scanned: number;
+    matched: number;
+    created: number;
+    skipped: number;
+    unmatched: number;
+    errors: string[];
+  }>;
 }
 
 export interface SettingsApi {

@@ -1,5 +1,6 @@
 import { IpcMain } from "electron";
 import { ConfidentialClientApplication } from "@azure/msal-node";
+import { dynamicsFetch, fetchAllPaginated } from "./dynamics";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
@@ -163,40 +164,67 @@ export function registerGraphHandlers(ipcMain: IpcMain) {
   });
 
   /**
-   * Check inbox for replies to tracked outbound emails.
-   * Returns any new replies found since last check.
+   * Check inbox for replies to a provided list of tracked outbound emails.
+   * The caller supplies the tracked list (typically sourced from Dynamics
+   * email activities) so this handler is stateless and works standalone.
+   *
+   * For each unique recipient we query the inbox for messages from that
+   * sender received on/after the earliest send date, and match them back to
+   * the most recent send to that address.
    */
-  ipcMain.handle("graph:checkReplies", async () => {
-    if (sentEmails.size === 0) return [];
+  ipcMain.handle(
+    "graph:checkReplies",
+    async (_event, tracked: TrackedEmail[] = []) => {
+      if (!tracked || tracked.length === 0) return [];
 
-    const user = getUserPrincipal();
-    const replies: Array<{
-      originalEmail: TrackedEmail;
-      replyFrom: string;
-      replySubject: string;
-      replyPreview: string;
-      replyReceivedAt: string;
-    }> = [];
+      const user = getUserPrincipal();
 
-    // Check inbox for messages in tracked conversations
-    const conversationIds = Array.from(sentEmails.keys());
+      // Group tracked emails by lowercased recipient, keeping the earliest
+      // sentAt (to bound the inbox query) and the latest send (to attribute
+      // the reply to the most recent outreach).
+      type Bucket = {
+        earliest: string;
+        latest: TrackedEmail;
+      };
+      const byAddress = new Map<string, Bucket>();
+      for (const t of tracked) {
+        if (!t.to) continue;
+        const key = t.to.toLowerCase();
+        const existing = byAddress.get(key);
+        if (!existing) {
+          byAddress.set(key, { earliest: t.sentAt, latest: t });
+          continue;
+        }
+        if (new Date(t.sentAt) < new Date(existing.earliest)) {
+          existing.earliest = t.sentAt;
+        }
+        if (new Date(t.sentAt) > new Date(existing.latest.sentAt)) {
+          existing.latest = t;
+        }
+      }
 
-    for (const convId of conversationIds) {
-      const tracked = sentEmails.get(convId)!;
+      const replies: Array<{
+        originalEmail: TrackedEmail;
+        replyFrom: string;
+        replySubject: string;
+        replyPreview: string;
+        replyReceivedAt: string;
+      }> = [];
 
-      const res = await graphFetch(
-        `/users/${user}/mailFolders/inbox/messages?$filter=conversationId eq '${convId}'&$top=5&$orderby=receivedDateTime desc&$select=id,from,subject,bodyPreview,receivedDateTime,isRead`
-      );
-
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      for (const msg of data.value || []) {
-        const fromAddr = msg.from?.emailAddress?.address?.toLowerCase();
-        // Only count messages FROM the recipient (not our own messages)
-        if (fromAddr && fromAddr === tracked.to.toLowerCase()) {
+      for (const [address, bucket] of byAddress) {
+        const safeAddr = address.replace(/'/g, "''");
+        const since = new Date(bucket.earliest).toISOString();
+        const filter = `from/emailAddress/address eq '${safeAddr}' and receivedDateTime ge ${since}`;
+        const res = await graphFetch(
+          `/users/${user}/mailFolders/inbox/messages?$filter=${encodeURIComponent(filter)}&$top=5&$orderby=receivedDateTime desc&$select=id,from,subject,bodyPreview,receivedDateTime`
+        );
+        if (!res.ok) continue;
+        const data = await res.json();
+        for (const msg of data.value || []) {
+          const fromAddr = msg.from?.emailAddress?.address?.toLowerCase();
+          if (!fromAddr || fromAddr !== address) continue;
           replies.push({
-            originalEmail: tracked,
+            originalEmail: bucket.latest,
             replyFrom: fromAddr,
             replySubject: msg.subject || "",
             replyPreview: msg.bodyPreview || "",
@@ -204,10 +232,10 @@ export function registerGraphHandlers(ipcMain: IpcMain) {
           });
         }
       }
-    }
 
-    return replies;
-  });
+      return replies;
+    }
+  );
 
   /**
    * Get all tracked outbound emails
@@ -269,4 +297,151 @@ export function registerGraphHandlers(ipcMain: IpcMain) {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
     return data.length;
   });
+
+  /**
+   * Backfill Dynamics email activities from the user's Graph Sent Items.
+   *
+   * For each sent message whose sole recipient is a known Dynamics contact
+   * and which does not already have a matching activity, this creates an
+   * email activity with actualend set to the real send time.
+   *
+   * Returns a summary: { scanned, matched, created, skipped, unmatched, errors }.
+   */
+  ipcMain.handle(
+    "graph:backfillSentEmails",
+    async (
+      _event,
+      params: { senderSystemUserId: string; sinceIso?: string; maxMessages?: number }
+    ) => {
+      if (!params?.senderSystemUserId) throw new Error("senderSystemUserId required");
+      const user = getUserPrincipal();
+      const max = params.maxMessages ?? 2000;
+
+      // 1. Fetch Dynamics contacts, build email → contactid map.
+      const contactsRes = await dynamicsFetch(
+        "/contacts?$select=contactid,emailaddress1"
+      );
+      if (!contactsRes.ok) throw new Error(`Failed to fetch contacts: ${contactsRes.status}`);
+      const contactsData = await contactsRes.json();
+      const contactByEmail = new Map<string, string>();
+      for (const c of contactsData.value || []) {
+        const em = (c.emailaddress1 || "").toLowerCase();
+        if (em && c.contactid) contactByEmail.set(em, c.contactid);
+      }
+
+      // 2. Fetch existing email activity subjects/recipients for dedupe.
+      //    Key: `${to-lower}|${subject}` — duplicates are skipped.
+      const existing = await fetchAllPaginated<{
+        subject?: string;
+        email_activity_parties?: Array<{
+          participationtypemask?: number;
+          addressused?: string;
+        }>;
+      }>(
+        "/emails?$select=subject,activityid&$filter=directioncode eq true&$expand=email_activity_parties($select=addressused,participationtypemask)"
+      );
+      const existingKeys = new Set<string>();
+      for (const e of existing) {
+        const toParty = (e.email_activity_parties || []).find(
+          (p) => p.participationtypemask === 2
+        );
+        const addr = (toParty?.addressused || "").toLowerCase();
+        if (!addr) continue;
+        existingKeys.add(`${addr}|${e.subject || ""}`);
+      }
+
+      // 3. Page through Graph Sent Items.
+      type SentMsg = {
+        id: string;
+        subject?: string;
+        body?: { contentType?: string; content?: string };
+        toRecipients?: Array<{ emailAddress?: { address?: string } }>;
+        sentDateTime?: string;
+      };
+      const messages: SentMsg[] = [];
+      let next: string | null =
+        `/users/${user}/mailFolders/sentItems/messages` +
+        `?$select=id,subject,body,toRecipients,sentDateTime` +
+        `&$orderby=sentDateTime desc&$top=100` +
+        (params.sinceIso ? `&$filter=sentDateTime ge ${params.sinceIso}` : "");
+      while (next && messages.length < max) {
+        const res: Response = await graphFetch(next);
+        if (!res.ok) throw new Error(`Graph sent items failed: ${res.status} ${await res.text()}`);
+        const data: { value?: SentMsg[]; "@odata.nextLink"?: string } = await res.json();
+        for (const m of data.value || []) messages.push(m);
+        next = data["@odata.nextLink"] || null;
+      }
+
+      // 4. For each message, match to a contact, dedupe, and create activity.
+      let matched = 0;
+      let created = 0;
+      let skipped = 0;
+      let unmatched = 0;
+      const errors: string[] = [];
+
+      for (const msg of messages) {
+        const recipients = msg.toRecipients || [];
+        if (recipients.length !== 1) {
+          unmatched++;
+          continue;
+        }
+        const to = (recipients[0].emailAddress?.address || "").toLowerCase();
+        if (!to) {
+          unmatched++;
+          continue;
+        }
+        const contactId = contactByEmail.get(to);
+        if (!contactId) {
+          unmatched++;
+          continue;
+        }
+        matched++;
+
+        const subject = msg.subject || "";
+        const key = `${to}|${subject}`;
+        if (existingKeys.has(key)) {
+          skipped++;
+          continue;
+        }
+
+        const payload: Record<string, unknown> = {
+          subject,
+          description: msg.body?.content || "",
+          directioncode: true,
+          actualend: msg.sentDateTime,
+          email_activity_parties: [
+            {
+              "partyid_systemuser@odata.bind": `/systemusers(${params.senderSystemUserId})`,
+              participationtypemask: 1,
+            },
+            {
+              "partyid_contact@odata.bind": `/contacts(${contactId})`,
+              participationtypemask: 2,
+            },
+          ],
+          "regardingobjectid_contact@odata.bind": `/contacts(${contactId})`,
+        };
+
+        const createRes = await dynamicsFetch("/emails", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        if (!createRes.ok) {
+          errors.push(`${to} / ${subject}: ${createRes.status} ${await createRes.text()}`);
+          continue;
+        }
+        created++;
+        existingKeys.add(key);
+      }
+
+      return {
+        scanned: messages.length,
+        matched,
+        created,
+        skipped,
+        unmatched,
+        errors: errors.slice(0, 20),
+      };
+    }
+  );
 }

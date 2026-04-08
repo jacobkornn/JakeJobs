@@ -15,6 +15,8 @@ const api = {
       ipcRenderer.invoke("dynamics:getSystemUserId", email),
     logEmailActivity: (params: { contactId: string; subject: string; body: string; senderSystemUserId: string; jobPostingId?: string }) =>
       ipcRenderer.invoke("dynamics:logEmailActivity", params),
+    getSentEmails: (senderSystemUserId: string) =>
+      ipcRenderer.invoke("dynamics:getSentEmails", senderSystemUserId),
   },
 
   // Careerflow (CSV import from Downloads)
@@ -61,11 +63,13 @@ const api = {
   graph: {
     sendEmail: (email: { to: string; subject: string; bodyHtml: string; contactId?: string; jobId?: string; attachments?: Array<{ name: string; contentBytes: string; contentType: string }> }) =>
       ipcRenderer.invoke("graph:sendEmail", email),
-    checkReplies: () => ipcRenderer.invoke("graph:checkReplies"),
+    checkReplies: (tracked: unknown[]) => ipcRenderer.invoke("graph:checkReplies", tracked),
     getMessageBody: (messageId: string) => ipcRenderer.invoke("graph:getMessageBody", messageId),
     getTrackedEmails: () => ipcRenderer.invoke("graph:getTrackedEmails"),
     loadTrackedEmails: () => ipcRenderer.invoke("graph:loadTrackedEmails"),
     saveTrackedEmails: () => ipcRenderer.invoke("graph:saveTrackedEmails"),
+    backfillSentEmails: (params: { senderSystemUserId: string; sinceIso?: string; maxMessages?: number }) =>
+      ipcRenderer.invoke("graph:backfillSentEmails", params),
   },
 
   // Settings

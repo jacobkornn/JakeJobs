@@ -118,7 +118,6 @@ async function upsertContact(contact: {
     emailaddress1: email,
     jobtitle: contact.jobtitle || undefined,
     telephone1: contact.phone || undefined,
-    cr21a_linkedinprofile: contact.linkedinUrl || undefined,
     address1_city: contact.location || undefined,
   };
 

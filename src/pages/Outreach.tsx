@@ -301,7 +301,7 @@ export default function Outreach() {
     if (!api) return;
     setCheckingReplies(true);
     try {
-      const newReplies = await api.graph.checkReplies();
+      const newReplies = await api.graph.checkReplies(trackedEmails);
       setReplies(newReplies);
       if (newReplies.length > 0) {
         addMessage(`Found ${newReplies.length} reply(ies)!`, "success");
